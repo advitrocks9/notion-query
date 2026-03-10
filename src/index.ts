@@ -6,6 +6,28 @@ interface Env {
   MCP_OBJECT: DurableObjectNamespace;
 }
 
+async function notionFetch(
+  env: Env,
+  endpoint: string,
+  method: string = "GET",
+  body?: unknown,
+): Promise<any> {
+  const res = await fetch(`https://api.notion.com/v1${endpoint}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${env.NOTION_API_KEY}`,
+      "Notion-Version": "2022-06-28",
+      "Content-Type": "application/json",
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(`Notion API error ${res.status}: ${errorText}`);
+  }
+  return res.json();
+}
+
 export class NotionQueryMCP extends McpAgent<Env> {
   server = new McpServer({
     name: "notion-query",
