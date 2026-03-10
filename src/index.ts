@@ -126,6 +126,103 @@ export class NotionQueryMCP extends McpAgent<Env> {
         }
       },
     );
+
+    this.server.tool(
+      "get_page",
+      "Fetch a single Notion page with all its properties, flattened for easy reading.",
+      {
+        page_id: z.string().describe("Notion page ID (UUID)"),
+      },
+      async ({ page_id }) => {
+        try {
+          const data = await notionFetch(
+            this.env,
+            `/pages/${page_id}`,
+            "GET",
+          );
+
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify(
+                  {
+                    id: data.id,
+                    url: data.url,
+                    created_time: data.created_time,
+                    last_edited_time: data.last_edited_time,
+                    properties: data.properties,
+                  },
+                  null,
+                  2,
+                ),
+              },
+            ],
+          };
+        } catch (error) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Error fetching page: ${error instanceof Error ? error.message : String(error)}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+      },
+    );
+
+    this.server.tool(
+      "update_page",
+      "Update properties on a Notion page. Use to change status, dates, text, etc.",
+      {
+        page_id: z.string().describe("Notion page ID (UUID)"),
+        properties: z
+          .record(z.unknown())
+          .describe(
+            'Properties to update in Notion API format. Example: {"Status": {"status": {"name": "Done"}}}',
+          ),
+      },
+      async ({ page_id, properties }) => {
+        try {
+          const data = await notionFetch(
+            this.env,
+            `/pages/${page_id}`,
+            "PATCH",
+            { properties },
+          );
+
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify(
+                  {
+                    id: data.id,
+                    url: data.url,
+                    last_edited_time: data.last_edited_time,
+                    properties: data.properties,
+                  },
+                  null,
+                  2,
+                ),
+              },
+            ],
+          };
+        } catch (error) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Error updating page: ${error instanceof Error ? error.message : String(error)}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+      },
+    );
   }
 }
 
