@@ -29,6 +29,95 @@ async function notionFetch(
   return res.json();
 }
 
+// Flatten Notion's deeply nested property objects into simple key-value pairs
+function flattenProperties(
+  properties: Record<string, any>,
+): Record<string, any> {
+  const flat: Record<string, any> = {};
+  for (const [name, prop] of Object.entries(properties)) {
+    switch (prop.type) {
+      case "title":
+        flat[name] =
+          prop.title?.map((t: { plain_text: string }) => t.plain_text).join("") || "";
+        break;
+      case "rich_text":
+        flat[name] =
+          prop.rich_text?.map((t: { plain_text: string }) => t.plain_text).join("") || "";
+        break;
+      case "number":
+        flat[name] = prop.number;
+        break;
+      case "select":
+        flat[name] = prop.select?.name || null;
+        break;
+      case "multi_select":
+        flat[name] = prop.multi_select?.map((s: { name: string }) => s.name) || [];
+        break;
+      case "status":
+        flat[name] = prop.status?.name || null;
+        break;
+      case "date":
+        flat[name] = prop.date
+          ? { start: prop.date.start, end: prop.date.end }
+          : null;
+        break;
+      case "checkbox":
+        flat[name] = prop.checkbox;
+        break;
+      case "url":
+        flat[name] = prop.url;
+        break;
+      case "email":
+        flat[name] = prop.email;
+        break;
+      case "phone_number":
+        flat[name] = prop.phone_number;
+        break;
+      case "formula":
+        flat[name] = prop.formula?.[prop.formula.type];
+        break;
+      case "relation":
+        flat[name] = prop.relation?.map((r: { id: string }) => r.id) || [];
+        break;
+      case "rollup":
+        flat[name] = prop.rollup?.[prop.rollup.type];
+        break;
+      case "people":
+        flat[name] =
+          prop.people?.map((p: { name?: string; id: string }) => p.name || p.id) || [];
+        break;
+      case "files":
+        flat[name] =
+          prop.files?.map(
+            (f: { name?: string; external?: { url: string }; file?: { url: string } }) =>
+              f.name || f.external?.url || f.file?.url,
+          ) || [];
+        break;
+      case "created_time":
+        flat[name] = prop.created_time;
+        break;
+      case "last_edited_time":
+        flat[name] = prop.last_edited_time;
+        break;
+      case "created_by":
+        flat[name] = prop.created_by?.name || prop.created_by?.id;
+        break;
+      case "last_edited_by":
+        flat[name] =
+          prop.last_edited_by?.name || prop.last_edited_by?.id;
+        break;
+      case "unique_id":
+        flat[name] = prop.unique_id
+          ? `${prop.unique_id.prefix || ""}${prop.unique_id.number}`
+          : null;
+        break;
+      default:
+        flat[name] = prop[prop.type] ?? null;
+    }
+  }
+  return flat;
+}
+
 export class NotionQueryMCP extends McpAgent<Env> {
   server = new McpServer({
     name: "notion-query",
@@ -87,12 +176,12 @@ export class NotionQueryMCP extends McpAgent<Env> {
           );
 
           const results = data.results.map(
-            (page: { id: string; url: string; created_time: string; last_edited_time: string; properties: Record<string, unknown> }) => ({
+            (page: { id: string; url: string; created_time: string; last_edited_time: string; properties: Record<string, any> }) => ({
               id: page.id,
               url: page.url,
               created_time: page.created_time,
               last_edited_time: page.last_edited_time,
-              properties: page.properties,
+              properties: flattenProperties(page.properties),
             }),
           );
 
@@ -151,7 +240,7 @@ export class NotionQueryMCP extends McpAgent<Env> {
                     url: data.url,
                     created_time: data.created_time,
                     last_edited_time: data.last_edited_time,
-                    properties: data.properties,
+                    properties: flattenProperties(data.properties),
                   },
                   null,
                   2,
@@ -202,7 +291,7 @@ export class NotionQueryMCP extends McpAgent<Env> {
                     id: data.id,
                     url: data.url,
                     last_edited_time: data.last_edited_time,
-                    properties: data.properties,
+                    properties: flattenProperties(data.properties),
                   },
                   null,
                   2,
@@ -216,6 +305,84 @@ export class NotionQueryMCP extends McpAgent<Env> {
               {
                 type: "text" as const,
                 text: `Error updating page: ${error instanceof Error ? error.message : String(error)}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+      },
+    );
+
+    this.server.tool(
+      "list_databases",
+      "List all Notion databases the integration can access, with their schemas (property names, types, and options).",
+      {
+        query: z
+          .string()
+          .optional()
+          .describe("Optional search query to filter databases by title"),
+      },
+      async ({ query }) => {
+        try {
+          const data = await notionFetch(this.env, "/search", "POST", {
+            filter: { value: "database", property: "object" },
+            query: query || "",
+          });
+
+          const databases = data.results.map(
+            (db: { id: string; title?: Array<{ plain_text: string }>; properties: Record<string, any> }) => {
+              const title =
+                db.title?.map((t: { plain_text: string }) => t.plain_text).join("") ||
+                "Untitled";
+
+              const schema: Record<string, unknown> = {};
+              for (const [propName, prop] of Object.entries(db.properties)) {
+                const entry: Record<string, unknown> = { type: prop.type };
+                if (prop.type === "select" && prop.select?.options) {
+                  entry.options = prop.select.options.map(
+                    (o: { name: string }) => o.name,
+                  );
+                }
+                if (
+                  prop.type === "multi_select" &&
+                  prop.multi_select?.options
+                ) {
+                  entry.options = prop.multi_select.options.map(
+                    (o: { name: string }) => o.name,
+                  );
+                }
+                if (prop.type === "status" && prop.status?.options) {
+                  entry.options = prop.status.options.map(
+                    (o: { name: string }) => o.name,
+                  );
+                  entry.groups = prop.status.groups?.map(
+                    (g: { name: string; option_ids: string[] }) => ({
+                      name: g.name,
+                      option_ids: g.option_ids,
+                    }),
+                  );
+                }
+                schema[propName] = entry;
+              }
+
+              return { id: db.id, title, schema };
+            },
+          );
+
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify(databases, null, 2),
+              },
+            ],
+          };
+        } catch (error) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Error listing databases: ${error instanceof Error ? error.message : String(error)}`,
               },
             ],
             isError: true,
