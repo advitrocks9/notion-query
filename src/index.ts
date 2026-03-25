@@ -1,3 +1,4 @@
+// Notion Query MCP server. Exposes structured query tools over the Notion API.
 import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -27,6 +28,49 @@ async function notionFetch(
     throw new Error(`Notion API error ${res.status}: ${errorText}`);
   }
   return res.json();
+}
+
+// Tabular format: columns listed once, rows are value-only arrays — saves tokens on repeated keys
+interface CompactResult {
+  columns: string[];
+  rows: unknown[][];
+  has_more: boolean;
+  next_cursor: string | null;
+  total_results: number;
+}
+
+function formatCompact(
+  results: Array<{
+    id: string;
+    url: string;
+    properties: Record<string, unknown>;
+  }>,
+  hasMore: boolean,
+  nextCursor: string | null,
+): CompactResult {
+  const propKeys = new Set<string>();
+  for (const r of results) {
+    for (const key of Object.keys(r.properties)) {
+      propKeys.add(key);
+    }
+  }
+
+  const columns = ["id", "url", ...propKeys];
+  const rows = results.map((r) =>
+    columns.map((col) => {
+      if (col === "id") return r.id;
+      if (col === "url") return r.url;
+      return r.properties[col] ?? null;
+    }),
+  );
+
+  return {
+    columns,
+    rows,
+    has_more: hasMore,
+    next_cursor: nextCursor,
+    total_results: results.length,
+  };
 }
 
 // Flatten Notion's deeply nested property objects into simple key-value pairs
@@ -159,8 +203,21 @@ export class NotionQueryMCP extends McpAgent<Env> {
           .describe(
             "Cursor for pagination. Use next_cursor from previous response.",
           ),
+        format: z
+          .enum(["compact", "full"])
+          .default("compact")
+          .describe(
+            'Output format. "compact" returns columns + rows (token-efficient). "full" returns array of objects.',
+          ),
       },
-      async ({ database_id, filter, sorts, page_size, start_cursor }) => {
+      async ({
+        database_id,
+        filter,
+        sorts,
+        page_size,
+        start_cursor,
+        format,
+      }) => {
         try {
           const requestBody: Record<string, unknown> = {};
           if (filter) requestBody.filter = filter;
@@ -176,29 +233,32 @@ export class NotionQueryMCP extends McpAgent<Env> {
           );
 
           const results = data.results.map(
-            (page: { id: string; url: string; created_time: string; last_edited_time: string; properties: Record<string, any> }) => ({
+            (page: { id: string; url: string; properties: Record<string, any> }) => ({
               id: page.id,
               url: page.url,
-              created_time: page.created_time,
-              last_edited_time: page.last_edited_time,
               properties: flattenProperties(page.properties),
             }),
           );
+
+          const output =
+            format === "compact"
+              ? formatCompact(results, data.has_more, data.next_cursor)
+              : {
+                  results: results.map((r: { id: string; url: string; properties: Record<string, unknown> }) => ({
+                    id: r.id,
+                    url: r.url,
+                    ...r.properties,
+                  })),
+                  has_more: data.has_more,
+                  next_cursor: data.next_cursor,
+                  total_results: results.length,
+                };
 
           return {
             content: [
               {
                 type: "text" as const,
-                text: JSON.stringify(
-                  {
-                    results,
-                    has_more: data.has_more,
-                    next_cursor: data.next_cursor,
-                    total_results: results.length,
-                  },
-                  null,
-                  2,
-                ),
+                text: JSON.stringify(output, null, 2),
               },
             ],
           };
