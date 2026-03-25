@@ -1,92 +1,83 @@
-# Notion Query MCP Server
+# notion-query
 
-A custom [MCP](https://modelcontextprotocol.io/) server that gives Claude structured, SQL-style query access to any Notion database. Deployed on Cloudflare Workers (free tier).
+MCP server for structured Notion queries.
 
-## Why
+## The problem
 
-Claude's built-in Notion connector only supports semantic search (max 10 fuzzy results). It cannot filter by property values like Status, Module, or Type. This server wraps the Notion REST API to expose proper structured filtering, sorting, and pagination.
+Claude's built-in Notion connector only does semantic search, returning at most 10 fuzzy results. It cannot filter by property values (status, date, module, type), sort results, or paginate through large databases. If you want Claude to answer "show me all overdue tasks where Status is In Progress", the default connector can't do it.
 
-## Tools
+## How it works
 
-| Tool | Description |
-|------|-------------|
-| `query_database` | Query with filters, sorts, and pagination (SQL-style WHERE/ORDER BY/LIMIT) |
-| `get_page` | Fetch a single page with all properties |
-| `update_page` | Update page properties (status, dates, text, etc.) |
-| `list_databases` | Discover all accessible databases and their schemas |
+The server wraps the Notion REST API and exposes four tools over MCP:
+
+- **query_database**: Filter, sort, and paginate any database. Think SQL-style WHERE, ORDER BY, and LIMIT.
+- **get_page**: Fetch a single page with all its properties.
+- **update_page**: Modify page properties (status, dates, text, and others).
+- **list_databases**: Discover all databases the integration can access, along with their schemas.
+
+## Tech stack
+
+- TypeScript on Cloudflare Workers
+- MCP SDK (`@modelcontextprotocol/sdk`) with SSE and Streamable HTTP transports
+- Zod for input validation
+- Notion REST API (internal integration)
 
 ## Setup
 
-### Prerequisites
-
-- Node.js v18+
-- A [Cloudflare account](https://dash.cloudflare.com/sign-up) (free, no credit card)
-- A Notion workspace
-
-### 1. Create a Notion Integration
+### 1. Create a Notion integration
 
 1. Go to [notion.so/profile/integrations](https://www.notion.so/profile/integrations)
-2. Click **New integration**, name it (e.g. `Claude MCP Bridge`)
+2. Click **New integration**, name it whatever you want
 3. Enable **Read content** and **Update content**
 4. Copy the **Internal Integration Secret** (starts with `ntn_`)
 
-### 2. Share Databases
+### 2. Share your databases
 
-Open each Notion database you want Claude to access, click `...` > **Connections** > **Connect to** > select your integration.
+Open each Notion database you want Claude to query. Click `...` > **Connections** > **Connect to** and select your integration.
 
-### 3. Install and Deploy
+### 3. Deploy to Cloudflare
 
 ```bash
 git clone <this-repo>
 cd notion-query-mcp
 npm install
 
-# Login to Cloudflare
 npx wrangler login
-
-# Set your Notion API key as a secret
 npx wrangler secret put NOTION_API_KEY
-# Paste your ntn_XXXXX token
+# Paste your ntn_XXXXX token when prompted
 
-# Deploy
 npm run deploy
 ```
 
-The deploy outputs a URL like `https://notion-query-mcp.<your-subdomain>.workers.dev`.
+This gives you a URL like `https://notion-query-mcp.<your-subdomain>.workers.dev`.
 
-### 4. Connect to Claude.ai
+### 4. Connect to Claude
 
-1. Go to **Settings** > **Integrations** > **Add custom connector**
-2. Enter a name and your worker URL with `/sse` path (e.g. `https://notion-query-mcp.example.workers.dev/sse`)
+1. In Claude, go to **Settings** > **Integrations** > **Add custom connector**
+2. Enter your worker URL with the `/sse` path (e.g. `https://notion-query-mcp.example.workers.dev/sse`)
 3. Leave OAuth fields empty
 4. Click **Add**
 
-### 5. Test
+## Example queries
 
-Open a new Claude conversation and try:
+Once connected, try these in a Claude conversation:
 
-> "List all my Notion databases"
-
-> "Show me all tasks where Status is 'Not started', sorted by Date"
-
-## Endpoints
-
-The server exposes two MCP transports:
-
-- **SSE**: `/sse` (used by Claude.ai)
-- **Streamable HTTP**: `/mcp`
+- "List all my Notion databases"
+- "Show me all tasks where Status is 'Not started', sorted by due date"
+- "Mark task X as Done"
+- "What's overdue in my coursework database?"
 
 ## Development
 
 ```bash
-npm run dev        # Local dev server
-npm run type-check # TypeScript validation
-npm run deploy     # Deploy to Cloudflare
+npm run dev          # local dev server
+npm run type-check   # TypeScript validation
+npm run deploy       # deploy to Cloudflare
 ```
 
 ## Cost
 
-$0/month. Cloudflare Workers free tier provides 100,000 requests/day. The Notion API is free for internal integrations.
+Free. Cloudflare Workers gives you 100k requests/day on the free tier. The Notion API is free for internal integrations.
 
 ## License
 
