@@ -8,13 +8,13 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
-    "agents": "^0.0.80",
+    "@modelcontextprotocol/sdk": "1.26.0",
+    "agents": "^0.4.0",
     "zod": "^3.25.0"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250313.0",
     "typescript": "^5.7.3",
-    "wrangler": "^4.14.4"
+    "wrangler": "^4.36.0"
   }
 }

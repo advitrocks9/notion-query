@@ -8,12 +8,12 @@ Claude's built-in Notion connector only does semantic search, returning at most 
 
 ## How it works
 
-The server wraps the Notion REST API and exposes four tools over MCP:
+Wraps the Notion REST API and exposes four MCP tools:
 
-- **query_database**: Filter, sort, and paginate any database. Think SQL-style WHERE, ORDER BY, and LIMIT.
-- **get_page**: Fetch a single page with all its properties.
-- **update_page**: Modify page properties (status, dates, text, and others).
-- **list_databases**: Discover all databases the integration can access, along with their schemas.
+- **query_database** -- filter, sort, and paginate any database (WHERE + ORDER BY + LIMIT)
+- **get_page** -- fetch a single page with all its properties
+- **update_page** -- modify page properties (status, dates, text, etc.)
+- **list_databases** -- discover accessible databases and their schemas
 
 ## Tech stack
 
@@ -46,6 +46,9 @@ npx wrangler login
 npx wrangler secret put NOTION_API_KEY
 # Paste your ntn_XXXXX token when prompted
 
+npx wrangler secret put MCP_AUTH_TOKEN
+# Paste a strong random token (e.g. openssl rand -hex 32)
+
 npm run deploy
 ```
 
@@ -53,14 +56,44 @@ This gives you a URL like `https://notion-query-mcp.<your-subdomain>.workers.dev
 
 ### 4. Connect to Claude
 
-1. In Claude, go to **Settings** > **Integrations** > **Add custom connector**
-2. Enter your worker URL with the `/sse` path (e.g. `https://notion-query-mcp.example.workers.dev/sse`)
-3. Leave OAuth fields empty
-4. Click **Add**
+All requests require a bearer token. Set your `MCP_AUTH_TOKEN` as a Cloudflare secret (step 3), then configure your MCP client to send it.
+
+**Claude Desktop / claude.ai config:**
+
+```json
+{
+  "mcpServers": {
+    "notion-query": {
+      "url": "https://notion-query-mcp.your-subdomain.workers.dev/sse",
+      "headers": {
+        "Authorization": "Bearer YOUR_MCP_AUTH_TOKEN"
+      }
+    }
+  }
+}
+```
+
+**Claude Code config (`~/.claude.json` or project `.mcp.json`):**
+
+```json
+{
+  "mcpServers": {
+    "notion-query": {
+      "type": "sse",
+      "url": "https://notion-query-mcp.your-subdomain.workers.dev/sse",
+      "headers": {
+        "Authorization": "Bearer YOUR_MCP_AUTH_TOKEN"
+      }
+    }
+  }
+}
+```
+
+Replace `YOUR_MCP_AUTH_TOKEN` with the same token you set via `wrangler secret put`.
 
 ## Example queries
 
-Once connected, try these in a Claude conversation:
+Once connected, try in a Claude conversation:
 
 - "List all my Notion databases"
 - "Show me all tasks where Status is 'Not started', sorted by due date"
@@ -75,9 +108,17 @@ npm run type-check   # TypeScript validation
 npm run deploy       # deploy to Cloudflare
 ```
 
+## Security
+
+- Bearer token auth on all endpoints (`npx wrangler secret put MCP_AUTH_TOKEN`)
+- CORS locked to `https://claude.ai`
+- Rate limited: 60 req/min via Cloudflare Rate Limiting
+- All IDs validated as UUIDs; filters validated against a structured Zod schema; property updates capped at 50 fields
+- Notion API errors logged server-side only; clients get generic error codes
+
 ## Cost
 
-Free. Cloudflare Workers gives you 100k requests/day on the free tier. The Notion API is free for internal integrations.
+Free. Cloudflare Workers free tier (100k req/day) + Notion API (free for internal integrations).
 
 ## License
 

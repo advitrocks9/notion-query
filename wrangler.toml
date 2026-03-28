@@ -1,6 +1,6 @@
 name = "notion-query-mcp"
 main = "src/index.ts"
-compatibility_date = "2025-03-14"
+compatibility_date = "2026-03-27"
 compatibility_flags = ["nodejs_compat"]
 
 [[durable_objects.bindings]]
@@ -11,5 +11,14 @@ class_name = "NotionQueryMCP"
 tag = "v1"
 new_sqlite_classes = ["NotionQueryMCP"]
 
-# Secret set via CLI:
+# Secrets set via CLI:
 # npx wrangler secret put NOTION_API_KEY
+# npx wrangler secret put MCP_AUTH_TOKEN
+
+[[ratelimits]]
+name = "MCP_LIMITER"
+namespace_id = "1001"
+
+[ratelimits.simple]
+limit = 60
+period = 60

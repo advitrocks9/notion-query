@@ -5,7 +5,59 @@ import { z } from "zod";
 
 interface Env {
   NOTION_API_KEY: string;
+  MCP_AUTH_TOKEN: string;
   MCP_OBJECT: DurableObjectNamespace;
+  MCP_LIMITER: RateLimit;
+}
+
+function authenticate(request: Request, env: Env): Response | null {
+  if (request.method === "OPTIONS") return null;
+
+  const authHeader = request.headers.get("Authorization") ?? "";
+  const expected = `Bearer ${env.MCP_AUTH_TOKEN}`;
+
+  const encoder = new TextEncoder();
+  const a = encoder.encode(authHeader);
+  const b = encoder.encode(expected);
+
+  if (a.byteLength !== b.byteLength) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+
+  if (!crypto.subtle.timingSafeEqual(a, b)) {
+    return new Response("Unauthorized", { status: 401 });
+  }
+
+  return null;
+}
+
+interface NotionListResponse {
+  results: NotionPage[];
+  has_more: boolean;
+  next_cursor: string | null;
+}
+
+interface NotionPage {
+  id: string;
+  url: string;
+  created_time: string;
+  last_edited_time: string;
+  properties: Record<string, NotionProperty>;
+}
+
+interface NotionProperty {
+  type: string;
+  [key: string]: unknown;
+}
+
+interface NotionDatabase {
+  id: string;
+  title?: Array<{ plain_text: string }>;
+  properties: Record<string, NotionProperty>;
+}
+
+interface NotionSearchResponse {
+  results: NotionDatabase[];
 }
 
 async function notionFetch(
@@ -13,7 +65,7 @@ async function notionFetch(
   endpoint: string,
   method: string = "GET",
   body?: unknown,
-): Promise<any> {
+): Promise<unknown> {
   const res = await fetch(`https://api.notion.com/v1${endpoint}`, {
     method,
     headers: {
@@ -23,14 +75,186 @@ async function notionFetch(
     },
     body: body ? JSON.stringify(body) : undefined,
   });
+
   if (!res.ok) {
     const errorText = await res.text();
-    throw new Error(`Notion API error ${res.status}: ${errorText}`);
+    console.error(`Notion API ${res.status}: ${errorText}`);
+
+    // Don't forward raw Notion error details to clients
+    let code = "unknown";
+    try {
+      const parsed = JSON.parse(errorText) as { code?: string };
+      code = parsed.code ?? "unknown";
+    } catch {
+      // raw text error, code stays "unknown"
+    }
+
+    throw new Error(`Notion API error (${res.status}/${code})`);
   }
+
   return res.json();
 }
 
-// Tabular format: columns listed once, rows are value-only arrays — saves tokens on repeated keys
+// Notion IDs are UUIDs, optionally without dashes
+const notionId = z.string().regex(
+  /^[a-f0-9]{8}-?[a-f0-9]{4}-?[a-f0-9]{4}-?[a-f0-9]{4}-?[a-f0-9]{12}$/i,
+  "Must be a valid Notion ID (UUID format)",
+);
+
+const textCondition = z.object({
+  equals: z.string().optional(),
+  does_not_equal: z.string().optional(),
+  contains: z.string().optional(),
+  does_not_contain: z.string().optional(),
+  starts_with: z.string().optional(),
+  ends_with: z.string().optional(),
+  is_empty: z.literal(true).optional(),
+  is_not_empty: z.literal(true).optional(),
+}).strict();
+
+const numberCondition = z.object({
+  equals: z.number().optional(),
+  does_not_equal: z.number().optional(),
+  greater_than: z.number().optional(),
+  less_than: z.number().optional(),
+  greater_than_or_equal_to: z.number().optional(),
+  less_than_or_equal_to: z.number().optional(),
+  is_empty: z.literal(true).optional(),
+  is_not_empty: z.literal(true).optional(),
+}).strict();
+
+const checkboxCondition = z.object({
+  equals: z.boolean().optional(),
+  does_not_equal: z.boolean().optional(),
+}).strict();
+
+const selectCondition = z.object({
+  equals: z.string().optional(),
+  does_not_equal: z.string().optional(),
+  is_empty: z.literal(true).optional(),
+  is_not_empty: z.literal(true).optional(),
+}).strict();
+
+const multiSelectCondition = z.object({
+  contains: z.string().optional(),
+  does_not_contain: z.string().optional(),
+  is_empty: z.literal(true).optional(),
+  is_not_empty: z.literal(true).optional(),
+}).strict();
+
+const dateCondition = z.object({
+  equals: z.string().optional(),
+  before: z.string().optional(),
+  after: z.string().optional(),
+  on_or_before: z.string().optional(),
+  on_or_after: z.string().optional(),
+  past_week: z.object({}).optional(),
+  past_month: z.object({}).optional(),
+  past_year: z.object({}).optional(),
+  next_week: z.object({}).optional(),
+  next_month: z.object({}).optional(),
+  next_year: z.object({}).optional(),
+  is_empty: z.literal(true).optional(),
+  is_not_empty: z.literal(true).optional(),
+}).strict();
+
+const relationCondition = z.object({
+  contains: z.string().optional(),
+  does_not_contain: z.string().optional(),
+  is_empty: z.literal(true).optional(),
+  is_not_empty: z.literal(true).optional(),
+}).strict();
+
+const formulaCondition = z.object({
+  string: textCondition.optional(),
+  checkbox: checkboxCondition.optional(),
+  number: numberCondition.optional(),
+  date: dateCondition.optional(),
+}).strict();
+
+// Explicit types needed — z.lazy circular inference can't infer these
+interface PropertyFilterShape {
+  property: string;
+  rich_text?: z.infer<typeof textCondition>;
+  title?: z.infer<typeof textCondition>;
+  url?: z.infer<typeof textCondition>;
+  email?: z.infer<typeof textCondition>;
+  phone_number?: z.infer<typeof textCondition>;
+  number?: z.infer<typeof numberCondition>;
+  checkbox?: z.infer<typeof checkboxCondition>;
+  select?: z.infer<typeof selectCondition>;
+  multi_select?: z.infer<typeof multiSelectCondition>;
+  status?: z.infer<typeof selectCondition>;
+  date?: z.infer<typeof dateCondition>;
+  created_time?: z.infer<typeof dateCondition>;
+  last_edited_time?: z.infer<typeof dateCondition>;
+  people?: z.infer<typeof relationCondition>;
+  created_by?: z.infer<typeof relationCondition>;
+  last_edited_by?: z.infer<typeof relationCondition>;
+  files?: { is_empty?: true; is_not_empty?: true };
+  relation?: z.infer<typeof relationCondition>;
+  formula?: z.infer<typeof formulaCondition>;
+  rollup?: RollupConditionShape;
+}
+
+interface RollupConditionShape {
+  any?: PropertyFilterShape;
+  none?: PropertyFilterShape;
+  every?: PropertyFilterShape;
+  date?: z.infer<typeof dateCondition>;
+  number?: z.infer<typeof numberCondition>;
+}
+
+const rollupCondition: z.ZodType<RollupConditionShape> = z.lazy(() =>
+  z.object({
+    any: propertyFilter.optional(),
+    none: propertyFilter.optional(),
+    every: propertyFilter.optional(),
+    date: dateCondition.optional(),
+    number: numberCondition.optional(),
+  }).strict(),
+);
+
+const propertyFilter: z.ZodType<PropertyFilterShape> = z.lazy(() =>
+  z.object({
+    property: z.string(),
+    rich_text: textCondition.optional(),
+    title: textCondition.optional(),
+    url: textCondition.optional(),
+    email: textCondition.optional(),
+    phone_number: textCondition.optional(),
+    number: numberCondition.optional(),
+    checkbox: checkboxCondition.optional(),
+    select: selectCondition.optional(),
+    multi_select: multiSelectCondition.optional(),
+    status: selectCondition.optional(),
+    date: dateCondition.optional(),
+    created_time: dateCondition.optional(),
+    last_edited_time: dateCondition.optional(),
+    people: relationCondition.optional(),
+    created_by: relationCondition.optional(),
+    last_edited_by: relationCondition.optional(),
+    files: z.object({ is_empty: z.literal(true).optional(), is_not_empty: z.literal(true).optional() }).strict().optional(),
+    relation: relationCondition.optional(),
+    formula: formulaCondition.optional(),
+    rollup: rollupCondition.optional(),
+  }),
+);
+
+type NotionFilter =
+  | PropertyFilterShape
+  | { and: NotionFilter[] }
+  | { or: NotionFilter[] };
+
+const notionFilter: z.ZodType<NotionFilter> = z.lazy(() =>
+  z.union([
+    propertyFilter,
+    z.object({ and: z.array(notionFilter) }).strict(),
+    z.object({ or: z.array(notionFilter) }).strict(),
+  ]),
+);
+
+// Columnar format — columns listed once, rows are value arrays. Saves tokens.
 interface CompactResult {
   columns: string[];
   rows: unknown[][];
@@ -39,12 +263,14 @@ interface CompactResult {
   total_results: number;
 }
 
+interface FlatPage {
+  id: string;
+  url: string;
+  properties: Record<string, unknown>;
+}
+
 function formatCompact(
-  results: Array<{
-    id: string;
-    url: string;
-    properties: Record<string, unknown>;
-  }>,
+  results: FlatPage[],
   hasMore: boolean,
   nextCursor: string | null,
 ): CompactResult {
@@ -73,93 +299,83 @@ function formatCompact(
   };
 }
 
-// Flatten Notion's deeply nested property objects into simple key-value pairs
 function flattenProperties(
-  properties: Record<string, any>,
-): Record<string, any> {
-  const flat: Record<string, any> = {};
+  properties: Record<string, NotionProperty>,
+): Record<string, unknown> {
+  const flat: Record<string, unknown> = {};
   for (const [name, prop] of Object.entries(properties)) {
-    switch (prop.type) {
-      case "title":
-        flat[name] =
-          prop.title?.map((t: { plain_text: string }) => t.plain_text).join("") || "";
-        break;
-      case "rich_text":
-        flat[name] =
-          prop.rich_text?.map((t: { plain_text: string }) => t.plain_text).join("") || "";
-        break;
-      case "number":
-        flat[name] = prop.number;
-        break;
-      case "select":
-        flat[name] = prop.select?.name || null;
-        break;
-      case "multi_select":
-        flat[name] = prop.multi_select?.map((s: { name: string }) => s.name) || [];
-        break;
-      case "status":
-        flat[name] = prop.status?.name || null;
-        break;
-      case "date":
-        flat[name] = prop.date
-          ? { start: prop.date.start, end: prop.date.end }
-          : null;
-        break;
-      case "checkbox":
-        flat[name] = prop.checkbox;
-        break;
-      case "url":
-        flat[name] = prop.url;
-        break;
-      case "email":
-        flat[name] = prop.email;
-        break;
-      case "phone_number":
-        flat[name] = prop.phone_number;
-        break;
-      case "formula":
-        flat[name] = prop.formula?.[prop.formula.type];
-        break;
-      case "relation":
-        flat[name] = prop.relation?.map((r: { id: string }) => r.id) || [];
-        break;
-      case "rollup":
-        flat[name] = prop.rollup?.[prop.rollup.type];
-        break;
-      case "people":
-        flat[name] =
-          prop.people?.map((p: { name?: string; id: string }) => p.name || p.id) || [];
-        break;
-      case "files":
-        flat[name] =
-          prop.files?.map(
-            (f: { name?: string; external?: { url: string }; file?: { url: string } }) =>
-              f.name || f.external?.url || f.file?.url,
-          ) || [];
-        break;
-      case "created_time":
-        flat[name] = prop.created_time;
-        break;
-      case "last_edited_time":
-        flat[name] = prop.last_edited_time;
-        break;
-      case "created_by":
-        flat[name] = prop.created_by?.name || prop.created_by?.id;
-        break;
-      case "last_edited_by":
-        flat[name] =
-          prop.last_edited_by?.name || prop.last_edited_by?.id;
-        break;
-      case "unique_id":
-        flat[name] = prop.unique_id
-          ? `${prop.unique_id.prefix || ""}${prop.unique_id.number}`
-          : null;
-        break;
-      default:
-        flat[name] = prop[prop.type] ?? null;
-    }
+    flat[name] = flattenSingleProperty(prop);
   }
   return flat;
+}
+
+function flattenSingleProperty(prop: NotionProperty): unknown {
+  switch (prop.type) {
+    case "title":
+      return (prop.title as Array<{ plain_text: string }> | undefined)
+        ?.map((t) => t.plain_text).join("") ?? "";
+    case "rich_text":
+      return (prop.rich_text as Array<{ plain_text: string }> | undefined)
+        ?.map((t) => t.plain_text).join("") ?? "";
+    case "number":
+      return prop.number as number | null;
+    case "select":
+      return (prop.select as { name: string } | null)?.name ?? null;
+    case "multi_select":
+      return (prop.multi_select as Array<{ name: string }> | undefined)
+        ?.map((s) => s.name) ?? [];
+    case "status":
+      return (prop.status as { name: string } | null)?.name ?? null;
+    case "date": {
+      const d = prop.date as { start: string; end: string | null } | null;
+      return d ? { start: d.start, end: d.end } : null;
+    }
+    case "checkbox":
+      return prop.checkbox as boolean;
+    case "url":
+      return prop.url as string | null;
+    case "email":
+      return prop.email as string | null;
+    case "phone_number":
+      return prop.phone_number as string | null;
+    case "formula": {
+      const formula = prop.formula as { type: string; [k: string]: unknown } | undefined;
+      return formula ? formula[formula.type] : null;
+    }
+    case "relation":
+      return (prop.relation as Array<{ id: string }> | undefined)
+        ?.map((r) => r.id) ?? [];
+    case "rollup": {
+      const rollup = prop.rollup as { type: string; [k: string]: unknown } | undefined;
+      return rollup ? rollup[rollup.type] : null;
+    }
+    case "people":
+      return (prop.people as Array<{ name?: string; id: string }> | undefined)
+        ?.map((p) => p.name ?? p.id) ?? [];
+    case "files":
+      return (prop.files as Array<{
+        name?: string;
+        external?: { url: string };
+        file?: { url: string };
+      }> | undefined)
+        ?.map((f) => f.name ?? f.external?.url ?? f.file?.url) ?? [];
+    case "created_time":
+      return prop.created_time as string;
+    case "last_edited_time":
+      return prop.last_edited_time as string;
+    case "created_by":
+      return (prop.created_by as { name?: string; id: string } | undefined)?.name
+        ?? (prop.created_by as { id: string } | undefined)?.id;
+    case "last_edited_by":
+      return (prop.last_edited_by as { name?: string; id: string } | undefined)?.name
+        ?? (prop.last_edited_by as { id: string } | undefined)?.id;
+    case "unique_id": {
+      const uid = prop.unique_id as { prefix?: string; number: number } | null;
+      return uid ? `${uid.prefix ?? ""}${uid.number}` : null;
+    }
+    default:
+      return (prop[prop.type] as unknown) ?? null;
+  }
 }
 
 export class NotionQueryMCP extends McpAgent<Env> {
@@ -173,11 +389,9 @@ export class NotionQueryMCP extends McpAgent<Env> {
       "query_database",
       "Query a Notion database with structured filters, sorting, and pagination. Equivalent to SQL SELECT with WHERE, ORDER BY, and LIMIT/OFFSET.",
       {
-        database_id: z
-          .string()
+        database_id: notionId
           .describe("Notion database ID (UUID, with or without dashes)"),
-        filter: z
-          .any()
+        filter: notionFilter
           .optional()
           .describe(
             "Notion API filter object. Supports 'and'/'or' compound filters and property-level filters. Example: {\"property\": \"Status\", \"status\": {\"equals\": \"Not started\"}}",
@@ -195,8 +409,10 @@ export class NotionQueryMCP extends McpAgent<Env> {
           ),
         page_size: z
           .number()
+          .min(1)
+          .max(100)
           .optional()
-          .describe("Number of results per page (max 100, default 100)"),
+          .describe("Number of results per page (1-100, default 100)"),
         start_cursor: z
           .string()
           .optional()
@@ -207,7 +423,7 @@ export class NotionQueryMCP extends McpAgent<Env> {
           .enum(["compact", "full"])
           .default("compact")
           .describe(
-            'Output format. "compact" returns columns + rows (token-efficient). "full" returns array of objects.',
+            '"compact" returns columns + rows (token-efficient). "full" returns array of objects.',
           ),
       },
       async ({
@@ -230,21 +446,19 @@ export class NotionQueryMCP extends McpAgent<Env> {
             `/databases/${database_id}/query`,
             "POST",
             requestBody,
-          );
+          ) as NotionListResponse;
 
-          const results = data.results.map(
-            (page: { id: string; url: string; properties: Record<string, any> }) => ({
-              id: page.id,
-              url: page.url,
-              properties: flattenProperties(page.properties),
-            }),
-          );
+          const results: FlatPage[] = data.results.map((page) => ({
+            id: page.id,
+            url: page.url,
+            properties: flattenProperties(page.properties),
+          }));
 
           const output =
             format === "compact"
               ? formatCompact(results, data.has_more, data.next_cursor)
               : {
-                  results: results.map((r: { id: string; url: string; properties: Record<string, unknown> }) => ({
+                  results: results.map((r) => ({
                     id: r.id,
                     url: r.url,
                     ...r.properties,
@@ -280,7 +494,7 @@ export class NotionQueryMCP extends McpAgent<Env> {
       "get_page",
       "Fetch a single Notion page with all its properties, flattened for easy reading.",
       {
-        page_id: z.string().describe("Notion page ID (UUID)"),
+        page_id: notionId.describe("Notion page ID (UUID)"),
       },
       async ({ page_id }) => {
         try {
@@ -288,7 +502,7 @@ export class NotionQueryMCP extends McpAgent<Env> {
             this.env,
             `/pages/${page_id}`,
             "GET",
-          );
+          ) as NotionPage;
 
           return {
             content: [
@@ -326,9 +540,14 @@ export class NotionQueryMCP extends McpAgent<Env> {
       "update_page",
       "Update properties on a Notion page. Use to change status, dates, text, etc.",
       {
-        page_id: z.string().describe("Notion page ID (UUID)"),
+        page_id: notionId.describe("Notion page ID (UUID)"),
         properties: z
-          .record(z.unknown())
+          .record(z.string(), z.unknown())
+          // Notion pages rarely have >50 props; cap to prevent abuse
+          .refine(
+            (obj) => Object.keys(obj).length <= 50,
+            { message: "Cannot update more than 50 properties at once" },
+          )
           .describe(
             'Properties to update in Notion API format. Example: {"Status": {"status": {"name": "Done"}}}',
           ),
@@ -340,7 +559,7 @@ export class NotionQueryMCP extends McpAgent<Env> {
             `/pages/${page_id}`,
             "PATCH",
             { properties },
-          );
+          ) as NotionPage;
 
           return {
             content: [
@@ -386,48 +605,44 @@ export class NotionQueryMCP extends McpAgent<Env> {
         try {
           const data = await notionFetch(this.env, "/search", "POST", {
             filter: { value: "database", property: "object" },
-            query: query || "",
-          });
+            query: query ?? "",
+          }) as NotionSearchResponse;
 
-          const databases = data.results.map(
-            (db: { id: string; title?: Array<{ plain_text: string }>; properties: Record<string, any> }) => {
-              const title =
-                db.title?.map((t: { plain_text: string }) => t.plain_text).join("") ||
-                "Untitled";
+          const databases = data.results.map((db) => {
+            const title =
+              db.title?.map((t) => t.plain_text).join("") || "Untitled";
 
-              const schema: Record<string, unknown> = {};
-              for (const [propName, prop] of Object.entries(db.properties)) {
-                const entry: Record<string, unknown> = { type: prop.type };
-                if (prop.type === "select" && prop.select?.options) {
-                  entry.options = prop.select.options.map(
-                    (o: { name: string }) => o.name,
-                  );
-                }
-                if (
-                  prop.type === "multi_select" &&
-                  prop.multi_select?.options
-                ) {
-                  entry.options = prop.multi_select.options.map(
-                    (o: { name: string }) => o.name,
-                  );
-                }
-                if (prop.type === "status" && prop.status?.options) {
-                  entry.options = prop.status.options.map(
-                    (o: { name: string }) => o.name,
-                  );
-                  entry.groups = prop.status.groups?.map(
-                    (g: { name: string; option_ids: string[] }) => ({
-                      name: g.name,
-                      option_ids: g.option_ids,
-                    }),
-                  );
-                }
-                schema[propName] = entry;
+            const schema: Record<string, unknown> = {};
+            for (const [propName, prop] of Object.entries(db.properties)) {
+              const entry: Record<string, unknown> = { type: prop.type };
+
+              // Surface options so the LLM knows valid filter values
+              if (prop.type === "select") {
+                const sel = prop.select as { options?: Array<{ name: string }> } | undefined;
+                if (sel?.options) entry.options = sel.options.map((o) => o.name);
               }
+              if (prop.type === "multi_select") {
+                const ms = prop.multi_select as { options?: Array<{ name: string }> } | undefined;
+                if (ms?.options) entry.options = ms.options.map((o) => o.name);
+              }
+              if (prop.type === "status") {
+                const st = prop.status as {
+                  options?: Array<{ name: string }>;
+                  groups?: Array<{ name: string; option_ids: string[] }>;
+                } | undefined;
+                if (st?.options) entry.options = st.options.map((o) => o.name);
+                if (st?.groups) {
+                  entry.groups = st.groups.map((g) => ({
+                    name: g.name,
+                    option_ids: g.option_ids,
+                  }));
+                }
+              }
+              schema[propName] = entry;
+            }
 
-              return { id: db.id, title, schema };
-            },
-          );
+            return { id: db.id, title, schema };
+          });
 
           return {
             content: [
@@ -453,11 +668,28 @@ export class NotionQueryMCP extends McpAgent<Env> {
   }
 }
 
-const sseHandler = NotionQueryMCP.mount("/sse");
-const httpHandler = NotionQueryMCP.serve("/mcp");
+const corsOptions = {
+  origin: "https://claude.ai",
+  methods: "GET, POST, OPTIONS",
+  headers: "Content-Type, Authorization, mcp-session-id",
+};
+
+const sseHandler = NotionQueryMCP.mount("/sse", { corsOptions });
+const httpHandler = NotionQueryMCP.serve("/mcp", { corsOptions });
 
 export default {
-  fetch(request: Request, env: Env, ctx: ExecutionContext) {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+    const authError = authenticate(request, env);
+    if (authError) return authError;
+
+    // All authed clients share one rate-limit bucket
+    const { success } = await env.MCP_LIMITER.limit({
+      key: env.MCP_AUTH_TOKEN,
+    });
+    if (!success) {
+      return new Response("Rate limit exceeded", { status: 429 });
+    }
+
     const url = new URL(request.url);
 
     if (url.pathname.startsWith("/mcp")) {
