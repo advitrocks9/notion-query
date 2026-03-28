@@ -5,31 +5,10 @@ import { z } from "zod";
 
 interface Env {
   NOTION_API_KEY: string;
-  MCP_AUTH_TOKEN: string;
   MCP_OBJECT: DurableObjectNamespace;
   MCP_LIMITER: RateLimit;
 }
 
-function authenticate(request: Request, env: Env): Response | null {
-  if (request.method === "OPTIONS") return null;
-
-  const authHeader = request.headers.get("Authorization") ?? "";
-  const expected = `Bearer ${env.MCP_AUTH_TOKEN}`;
-
-  const encoder = new TextEncoder();
-  const a = encoder.encode(authHeader);
-  const b = encoder.encode(expected);
-
-  if (a.byteLength !== b.byteLength) {
-    return new Response("Unauthorized", { status: 401 });
-  }
-
-  if (!crypto.subtle.timingSafeEqual(a, b)) {
-    return new Response("Unauthorized", { status: 401 });
-  }
-
-  return null;
-}
 
 interface NotionListResponse {
   results: NotionPage[];
@@ -673,13 +652,8 @@ const httpHandler = NotionQueryMCP.serve("/mcp");
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
-    const authError = authenticate(request, env);
-    if (authError) return authError;
-
-    // All authed clients share one rate-limit bucket
-    const { success } = await env.MCP_LIMITER.limit({
-      key: env.MCP_AUTH_TOKEN,
-    });
+    const ip = request.headers.get("CF-Connecting-IP") ?? "global";
+    const { success } = await env.MCP_LIMITER.limit({ key: ip });
     if (!success) {
       return new Response("Rate limit exceeded", { status: 429 });
     }
