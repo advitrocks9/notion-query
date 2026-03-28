@@ -668,14 +668,8 @@ export class NotionQueryMCP extends McpAgent<Env> {
   }
 }
 
-const corsOptions = {
-  origin: "https://claude.ai",
-  methods: "GET, POST, OPTIONS",
-  headers: "Content-Type, Authorization, mcp-session-id",
-};
-
-const sseHandler = NotionQueryMCP.mount("/sse", { corsOptions });
-const httpHandler = NotionQueryMCP.serve("/mcp", { corsOptions });
+const sseHandler = NotionQueryMCP.mount("/sse");
+const httpHandler = NotionQueryMCP.serve("/mcp");
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
